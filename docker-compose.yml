@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  wps-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wps-bot
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      # WPS 开放平台配置
+      - WPS_APP_ID=${WPS_APP_ID}
+      - WPS_APP_SECRET=${WPS_APP_SECRET}
+      - WPS_ENCRYPT_KEY=${WPS_ENCRYPT_KEY:-}
+      - WPS_BASE_URL=${WPS_BASE_URL:-https://xz.wps.cn}
+      
+      # LLM 配置
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_API_BASE=${LLM_API_BASE}
+      - LLM_MODEL=${LLM_MODEL:-gpt-3.5-turbo}
+      
+      # 服务配置
+      - PORT=${PORT:-8080}
+      - HOST=${HOST:-0.0.0.0}
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      # 挂载日志目录
+      - ./logs:/app/logs
+      # 挂载配置文件（可选，如使用环境变量则不需要）
+      - ./config.json:/app/config.json:ro
+    networks:
+      - wps-bot-network
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  wps-bot-network:
+    driver: bridge

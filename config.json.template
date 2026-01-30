@@ -1,0 +1,36 @@
+{
+  "_comment": "WPS Bot 配置文件模板，请复制为 config.json 并填写实际值",
+  
+  "wps_app_id": "your_wps_app_id",
+  "wps_app_secret": "your_wps_app_secret",
+  "wps_encrypt_key": "",
+  "wps_base_url": "https://openapi.wps.cn",
+  "event_callback_url": "https://your-server.com/event/callback",
+  
+  "port": 8080,
+  "host": "0.0.0.0",
+  
+  "llm_api_key": "your_llm_api_key",
+  "llm_api_base": "http://your-llm-gateway:8000/v1",
+  "llm_model": "gpt-3.5-turbo",
+  
+  "single_chat_prefix": [""],
+  "single_chat_reply_prefix": "",
+  "group_chat_prefix": ["@机器人"],
+  "group_at_off": false,
+  "group_name_white_list": ["ALL_GROUP"],
+  "conversation_max_tokens": 4000,
+  "expires_in_seconds": 3600,
+  
+  "character_desc": "你是WPS智能助手，一个由大型语言模型驱动的AI助手，可以帮助用户解答问题、处理文档、编写代码等。",
+  
+  "temperature": 0.7,
+  "top_p": 1.0,
+  "frequency_penalty": 0.0,
+  "presence_penalty": 0.0,
+  "request_timeout": 120,
+  "max_tokens": 2048,
+  
+  "debug": false,
+  "log_level": "INFO"
+}

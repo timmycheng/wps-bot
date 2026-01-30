@@ -1,0 +1,18 @@
+# Web Framework
+flask==3.0.3
+werkzeug==3.0.3
+
+# OpenAI API
+openai==0.28.1
+
+# HTTP Client
+requests==2.31.0
+
+# Crypto
+pycryptodome==3.20.0
+
+# Utilities
+python-dateutil==2.9.0
+
+# Production Server
+gunicorn==23.0.0
