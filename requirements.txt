@@ -16,3 +16,5 @@ python-dateutil==2.9.0
 
 # Production Server
 gunicorn==23.0.0
+
+gradio==3.34.0

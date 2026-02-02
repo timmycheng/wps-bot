@@ -60,3 +60,4 @@ htmlcov/
 
 # Build
 *.spec
+*.tar
