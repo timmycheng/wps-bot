@@ -9,8 +9,6 @@ import logging
 import signal
 import sys
 
-from gradio import JSON
-
 from flask import Flask, request, jsonify
 
 from channel.wps_channel import get_channel
