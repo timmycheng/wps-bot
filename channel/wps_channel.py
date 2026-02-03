@@ -322,14 +322,15 @@ class WPSChannel:
                        f"sender={msg.from_user_name}({msg.from_user_id})")
             
             # 检测是否包含 Markdown 格式
-            msg_type = self._detect_message_type(reply_text)
-            logger.debug(f"[WPSChannel] Detected message type: {msg_type}")
+            is_markdown = self._is_markdown(reply_text)
+            logger.debug(f"[WPSChannel] Content contains markdown: {is_markdown}")
             
             result = api_client.send_message(
                 receiver_id=receiver_id,
                 receiver_type=receiver_type,
-                msg_type=msg_type,
-                content=reply_text
+                msg_type="text",
+                content=reply_text,
+                is_markdown=is_markdown
             )
             
             if result:
@@ -343,17 +344,15 @@ class WPSChannel:
             logger.error(f"[WPSChannel] Send reply error: {e}")
             return False
     
-    def _detect_message_type(self, content: str) -> str:
+    def _is_markdown(self, content: str) -> bool:
         """
-        检测消息类型
-        
-        如果内容包含 Markdown 格式标记，返回 rich_text，否则返回 text
+        检测内容是否包含 Markdown 格式
         
         :param content: 消息内容
-        :return: "text" 或 "rich_text"
+        :return: True 表示包含 Markdown 格式
         """
         if not content:
-            return "text"
+            return False
         
         # Markdown 特征正则表达式
         markdown_patterns = [
@@ -377,9 +376,9 @@ class WPSChannel:
         for pattern in markdown_patterns:
             if re.search(pattern, content, re.MULTILINE):
                 logger.debug(f"[WPSChannel] Markdown pattern matched: {pattern}")
-                return "rich_text"
+                return True
         
-        return "text"
+        return False
     
     def _is_duplicate(self, msg_id: str) -> bool:
         """检查消息是否重复"""

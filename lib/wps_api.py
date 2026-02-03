@@ -92,6 +92,7 @@ class WPSAPIClient:
         msg_type: str = "text",
         content: str = "",
         mentions: List[Dict] = None,
+        is_markdown: bool = False,
         **kwargs
     ) -> bool:
         """
@@ -127,30 +128,19 @@ class WPSAPIClient:
             # 设置消息内容
             # 根据 WPS 文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/im/message/message-content-description
             # type=text 时，content.text.type 可以是 plain 或 markdown
-            if msg_type == "text":
-                # 纯文本，不带格式
-                payload["content"] = {
-                    "text": {
-                        "content": content,
-                        "type": "plain"
-                    }
-                }
-            elif msg_type == "rich_text":
-                # Markdown 格式，保留原始 Markdown 标记
-                payload["content"] = {
-                    "text": {
-                        "content": content,
-                        "type": "markdown"
-                    }
-                }
+            if is_markdown:
+                # Markdown 格式，WPS 会渲染 Markdown
+                text_type = "markdown"
             else:
-                # 默认使用纯文本
-                payload["content"] = {
-                    "text": {
-                        "content": content,
-                        "type": "plain"
-                    }
+                # 纯文本，不渲染格式
+                text_type = "plain"
+            
+            payload["content"] = {
+                "text": {
+                    "content": content,
+                    "type": text_type
                 }
+            }
             
             # 添加@列表
             if mentions:
