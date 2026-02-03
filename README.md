@@ -15,8 +15,8 @@
 
 ```
 ┌─────────────────┐     ┌─────────────┐     ┌─────────────────┐
-│   WPS开放平台    │────▶│   WPS Bot   │────▶│   私有化LLM网关  │
-│  (事件订阅推送)  │◀────│  (中间层)    │◀────│  (OpenAI接口)   │
+│   WPS开放平台   │────▶│   WPS Bot   │────▶│  私有化LLM网关  │
+│  (事件订阅推送) │◀────│  (中间层)   │◀────│  (OpenAI接口)   │
 └─────────────────┘     └─────────────┘     └─────────────────┘
 ```
 
@@ -26,19 +26,16 @@
    - 登录 WPS 开放平台
    - 创建"企业内部应用"
    - 获取 AppID 和 AppSecret
+   - 打开机器人应用能力
 
-2. **订阅消息事件**
-   - 进入应用管理 → 事件订阅
-   - 配置回调地址（本服务的事件回调URL）
-   - 订阅 `kso.app_chat.message.create` 等消息事件
-
-3. **配置机器人**
-   - 设置事件回调URL：`https://your-server.com/event/callback`
-   - 订阅需要的消息类型
-
-4. **部署服务**
+2. **部署应用**
    - 配置 AppID、AppSecret、LLM网关地址
    - 启动服务
+
+3. **订阅消息事件**
+   - 进入应用管理 → 事件订阅
+   - 配置事件回调地址 `https://your-server.com/event/callback`（本服务的事件回调URL）
+   - 订阅 `kso.app_chat.message.create` 接收消息事件
 
 ## 快速开始
 
@@ -114,10 +111,10 @@ python app.py
 1. 登录 [WPS开放平台](https://open.wps.cn/)
 2. 创建企业内部应用
 3. 获取 **AppID** 和 **AppSecret**
-4. 进入"事件订阅"，配置回调地址
-5. 订阅以下事件：
+4. 打开机器人能力
+5. 进入"事件订阅"，配置回调地址
+6. 订阅以下事件：
    - `kso.app_chat.message.create` - 机器人接收消息
-   - `url_verification` - URL验证
 
 参考文档：
 - [事件订阅流程](https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/event-subscription/subscription-flow)
