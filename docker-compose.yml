@@ -20,6 +20,7 @@ services:
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_API_BASE=${LLM_API_BASE}
       - LLM_MODEL=${LLM_MODEL:-gpt-3.5-turbo}
+      - CHARACTER_DESC=${CHARACTER_DESC:-}
       
       # 服务配置
       - PORT=${PORT:-8080}

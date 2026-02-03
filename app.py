@@ -32,43 +32,32 @@ def event_callback():
 
     WPS开放平台会将订阅的事件推送到此URL
     包括：
-    - URL验证事件 (url_verification)
-    - 消息接收事件 (kso.app_chat.message.create)
-    - 其他业务事件
+    - URL验证事件 (url_verification) - 只有 challenge 字段
+    - 消息接收事件 (kso.app_chat.message.create) - 加密格式，需要签名验证和解密
     """
     try:
         # 获取请求体
         body = request.get_data(as_text=True)
-        headers = dict(request.headers)
 
         logger.debug(f"[EventCallback] Received request: {body[:500]}")
 
         # 解析事件数据
         try:
             event_data = json.loads(body)
-            if len(event_data) == 1 and "challenge" in event_data:
-                # URL验证事件
-                logger.info("[EventCallback] URL verification event received")
-                return jsonify(event_data)
-
         except json.JSONDecodeError as e:
             logger.error(f"[EventCallback] Invalid JSON: {e}")
             return jsonify({"code": 400, "msg": "Invalid JSON"}), 400
 
-        # 验证请求（WPS-3签名验证）
-        channel = get_channel()
-        if not channel.verify_callback(headers, body):
-            logger.warning("[EventCallback] Request verification failed")
-            return jsonify({"code": 401, "msg": "Unauthorized"}), 401
+        # 判断是否是 URL 验证事件（只有 challenge 字段的简单结构）
+        if len(event_data) == 1 and "challenge" in event_data:
+            logger.info("[EventCallback] URL verification event received")
+            return jsonify({"challenge": event_data["challenge"]})
 
-        # 处理事件
+        # 处理加密事件消息（签名验证 + 解密在 handle_event 内部完成）
+        channel = get_channel()
         response_data = channel.handle_event(event_data)
 
-        # 如果需要返回数据（如URL验证），则返回
-        if response_data is not None:
-            return jsonify(response_data)
-
-        # 返回成功响应
+        # 返回成功响应（WPS 要求返回 200 状态码）
         return jsonify({"code": 0, "msg": "success"})
 
     except Exception as e:

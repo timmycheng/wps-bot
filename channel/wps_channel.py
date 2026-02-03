@@ -3,12 +3,10 @@
 WPS 协作平台消息通道
 处理来自WPS开放平台的订阅消息推送
 
-事件名：kso.app_chat.message.create（机器人接收消息）
-文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/event-subscription/subscription-flow
+文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/event-subscription/security-verification
 """
 
 import json
-import re
 import time
 from typing import Dict, Optional
 
@@ -18,24 +16,18 @@ from channel.wps_message import WPSMessage
 from common.logger import logger
 from config import get_config
 from lib.wps_api import get_api_client
-from lib.wps_crypto import verify_wps3_signature
+from lib.wps_crypto import verify_event_signature, decrypt_event_data
 
 
 class WPSChannel:
     """
     WPS消息通道
     处理消息的接收和发送
-    
-    接入流程：
-    1. 在WPS开放平台创建企业内部应用
-    2. 订阅事件：kso.app_chat.message.create（机器人接收消息）
-    3. 配置事件回调地址（本服务的URL）
-    4. WPS平台将消息推送到回调地址
     """
     
     # WPS事件类型
-    EVENT_URL_VERIFICATION = "url_verification"  # URL验证事件
-    EVENT_MESSAGE_CREATE = "kso.app_chat.message.create"  # 机器人接收消息事件
+    EVENT_URL_VERIFICATION = "url_verification"
+    EVENT_MESSAGE_CREATE = "kso.app_chat.message.create"
     
     def __init__(self):
         self.config = get_config()
@@ -50,111 +42,145 @@ class WPSChannel:
         
         logger.info("[WPSChannel] Initialized")
     
-    def verify_callback(self, headers: Dict, body: str) -> bool:
+    def verify_and_decrypt(self, event_data: Dict) -> Optional[Dict]:
         """
-        验证WPS事件回调请求（WPS-3签名）
+        验证事件签名并解密数据
         
-        文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/event-subscription/security-verification
+        根据 WPS 文档，事件消息格式：
+        {
+            "topic": "xxx",
+            "operation": "xxx",
+            "time": 1234567890,
+            "nonce": "xxx",
+            "signature": "xxx",
+            "encrypted_data": "xxx"
+        }
         
-        签名算法: sha256(AppSecret + Timestamp + Nonce + Body)
-        
-        :param headers: HTTP请求头
-        :param body: 请求体
-        :return: 验证结果
+        :param event_data: 事件数据
+        :return: 解密后的事件数据，验证失败返回 None
         """
         try:
-            # 获取签名相关头
-            signature = headers.get("X-Kso-Signature", "")
-            timestamp = headers.get("X-Kso-Timestamp", "")
-            nonce = headers.get("X-Kso-Nonce", "")
-            app_id = headers.get("X-Kso-AppId", "")
+            # 提取必要字段
+            topic = event_data.get("topic", "")
+            operation = event_data.get("operation", "")
+            event_time = event_data.get("time", 0)
+            nonce = event_data.get("nonce", "")
+            signature = event_data.get("signature", "")
+            encrypted_data = event_data.get("encrypted_data", "")
             
-            if not all([signature, timestamp, nonce, app_id]):
-                logger.warning("[WPSChannel] Missing required headers")
-                return False
-            
-            # 验证AppID
-            if app_id != self.config.get("wps_app_id"):
-                logger.warning(f"[WPSChannel] AppID mismatch: {app_id}")
-                return False
+            if not all([topic, event_time, nonce, signature, encrypted_data]):
+                logger.warning("[WPSChannel] Missing required event fields")
+                logger.warning(f"[WPSChannel] topic={topic}, time={event_time}, nonce={'*' if nonce else ''}, signature={'*' if signature else ''}, encrypted_data={'*' if encrypted_data else ''}")
+                return None
             
             # 验证时间戳（5分钟有效期）
-            try:
-                ts = int(timestamp)
-                now = int(time.time() * 1000)  # 毫秒
-                if abs(now - ts) > 5 * 60 * 1000:
-                    logger.warning("[WPSChannel] Request timestamp expired")
-                    return False
-            except ValueError:
-                logger.warning("[WPSChannel] Invalid timestamp format")
-                return False
+            now = int(time.time())
+            time_diff = abs(now - event_time)
+            if time_diff > 5 * 60:
+                logger.warning(f"[WPSChannel] Event timestamp expired: event_time={event_time}, now={now}, diff={time_diff}s")
+                return None
             
-            # 验证WPS-3签名
+            # 获取配置
+            app_id = self.config.get("wps_app_id", "")
             app_secret = self.config.get("wps_app_secret", "")
-            if not verify_wps3_signature(app_secret, timestamp, nonce, signature, body):
-                logger.warning("[WPSChannel] WPS-3 signature verification failed")
-                return False
             
-            return True
+            if not app_id or not app_secret:
+                logger.error("[WPSChannel] App ID or Secret not configured")
+                return None
+            
+            logger.info(f"[WPSChannel] Verifying event: topic={topic}, app_id={app_id}")
+            
+            # 验证签名
+            if not verify_event_signature(
+                app_id=app_id,
+                app_secret=app_secret,
+                topic=topic,
+                nonce=nonce,
+                time=event_time,
+                encrypted_data=encrypted_data,
+                signature=signature
+            ):
+                logger.warning("[WPSChannel] Signature verification failed")
+                return None
+            
+            logger.info("[WPSChannel] Signature verified, decrypting data...")
+            
+            # 解密数据
+            try:
+                decrypted_data = decrypt_event_data(encrypted_data, app_secret, nonce)
+                logger.info(f"[WPSChannel] Decryption successful")
+                return decrypted_data
+            except Exception as e:
+                logger.error(f"[WPSChannel] Decryption failed: {e}")
+                logger.error(f"[WPSChannel] Please check if WPS_APP_SECRET is correct")
+                return None
             
         except Exception as e:
-            logger.error(f"[WPSChannel] Verification error: {e}")
-            return False
+            logger.error(f"[WPSChannel] Verification/Decryption error: {e}")
+            return None
     
     def handle_event(self, event_data: Dict) -> Optional[Dict]:
         """
         处理WPS事件
         
-        :param event_data: 事件数据
+        事件格式:
+        {
+            "topic": "kso.app_chat.message",
+            "operation": "create",
+            ...
+        }
+        
+        :param event_data: 事件数据（加密格式）
         :return: 响应数据
         """
         try:
-            event_type = event_data.get("event", "")
+            # 先验证签名并解密
+            decrypted_data = self.verify_and_decrypt(event_data)
+            if decrypted_data is None:
+                logger.warning("[WPSChannel] Failed to verify/decrypt event")
+                return None
             
-            logger.info(f"[WPSChannel] Received event: {event_type}")
+            # 从 topic 和 operation 判断事件类型
+            topic = event_data.get("topic", "")
+            operation = event_data.get("operation", "")
             
-            # URL验证事件（配置回调地址时触发）
-            if event_type == self.EVENT_URL_VERIFICATION:
-                return self._handle_url_verification(event_data)
+            logger.info(f"[WPSChannel] Received event: topic={topic}, operation={operation}")
             
-            # 机器人接收消息事件
-            if event_type == self.EVENT_MESSAGE_CREATE:
-                return self._handle_message_event(event_data)
+            # 消息创建事件
+            # 实际格式: topic="kso.app_chat.message", operation="create"
+            if (topic == "kso.app_chat.message" and operation == "create") or \
+               topic == "kso.app_chat.message.create":
+                return self._handle_message_event(decrypted_data)
             
             # 其他事件
-            logger.debug(f"[WPSChannel] Unhandled event type: {event_type}")
+            logger.debug(f"[WPSChannel] Unhandled event: topic={topic}, operation={operation}")
             return None
             
         except Exception as e:
             logger.error(f"[WPSChannel] Error handling event: {e}")
             return None
     
-    def _handle_url_verification(self, event_data: Dict) -> Dict:
+    def _handle_message_event(self, decrypted_data: Dict) -> Optional[Dict]:
         """
-        处理URL验证事件
+        处理机器人接收消息事件
         
-        文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/event-subscription/subscription-flow
-        
-        :param event_data: 事件数据
-        :return: 响应数据
-        """
-        challenge = event_data.get("challenge", "")
-        logger.info("[WPSChannel] Handling URL verification")
-        
-        return {
-            "challenge": challenge
+        解密后的数据结构:
+        {
+            "chat": {"id": "xxx", "type": "p2p/group"},
+            "message": {"id": "xxx", "type": "text", "content": {...}},
+            "sender": {"id": "xxx", "type": "user"},
+            ...
         }
-    
-    def _handle_message_event(self, event_data: Dict) -> Optional[Dict]:
-        """
-        处理机器人接收消息事件 (kso.app_chat.message.create)
         
-        :param event_data: 事件数据
+        :param decrypted_data: 解密后的事件数据
         :return: 响应数据
         """
         try:
-            # 解析消息
-            msg = WPSMessage(event_data)
+            logger.debug(f"[WPSChannel] Decrypted data: {decrypted_data}")
+            
+            # 解析消息 - 传递完整的数据，因为 chat 和 sender 在顶层
+            # WPSMessage 会自己处理 message 嵌套
+            msg = WPSMessage(decrypted_data)
             logger.info(f"[WPSChannel] Received message: {msg}")
             
             # 幂等检查
@@ -177,7 +203,7 @@ class WPSChannel:
             if reply_text:
                 self.send_reply(msg, reply_text)
             
-            return None  # 消息事件不需要同步返回
+            return None
             
         except Exception as e:
             logger.error(f"[WPSChannel] Error handling message event: {e}")
@@ -265,7 +291,7 @@ class WPSChannel:
         """
         发送回复消息
         
-        文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/im/message/single-create-msg
+        自动检测内容是否包含 Markdown 格式，如果是则使用 rich_text 类型发送
         
         :param msg: 原消息
         :param reply_text: 回复内容
@@ -274,34 +300,86 @@ class WPSChannel:
         try:
             api_client = get_api_client()
             
-            # 确定接收者类型
+            # 确定接收者
             if msg.is_group:
-                # 群聊回复
-                result = api_client.send_message(
-                    receiver_id=msg.chat_id,
-                    receiver_type="chat",
-                    msg_type="text",
-                    content=reply_text
-                )
+                receiver_id = msg.chat_id
+                receiver_type = "chat"
             else:
-                # 单聊回复
-                result = api_client.send_message(
-                    receiver_id=msg.from_user_id,
-                    receiver_type="user",
-                    msg_type="text",
-                    content=reply_text
-                )
+                receiver_id = msg.from_user_id
+                receiver_type = "user"
+            
+            logger.debug(f"[WPSChannel] Sending reply: is_group={msg.is_group}, "
+                        f"receiver_id={receiver_id}, receiver_type={receiver_type}")
+            
+            # 检查 receiver_id 是否为空
+            if not receiver_id:
+                logger.error(f"[WPSChannel] Receiver ID is empty! "
+                           f"chat_id={msg.chat_id}, from_user_id={msg.from_user_id}")
+                return False
+            
+            logger.info(f"[WPSChannel] Preparing to send reply to {receiver_type}:{receiver_id}")
+            logger.info(f"[WPSChannel] Original message: chat_type={msg.chat_type}, "
+                       f"sender={msg.from_user_name}({msg.from_user_id})")
+            
+            # 检测是否包含 Markdown 格式
+            msg_type = self._detect_message_type(reply_text)
+            logger.debug(f"[WPSChannel] Detected message type: {msg_type}")
+            
+            result = api_client.send_message(
+                receiver_id=receiver_id,
+                receiver_type=receiver_type,
+                msg_type=msg_type,
+                content=reply_text
+            )
             
             if result:
-                logger.info(f"[WPSChannel] Reply sent successfully")
+                logger.info(f"[WPSChannel] Reply sent successfully to {receiver_type}:{receiver_id}")
             else:
-                logger.error(f"[WPSChannel] Failed to send reply")
+                logger.error(f"[WPSChannel] Failed to send reply to {receiver_type}:{receiver_id}")
             
             return result
             
         except Exception as e:
             logger.error(f"[WPSChannel] Send reply error: {e}")
             return False
+    
+    def _detect_message_type(self, content: str) -> str:
+        """
+        检测消息类型
+        
+        如果内容包含 Markdown 格式标记，返回 rich_text，否则返回 text
+        
+        :param content: 消息内容
+        :return: "text" 或 "rich_text"
+        """
+        if not content:
+            return "text"
+        
+        # Markdown 特征正则表达式
+        markdown_patterns = [
+            r'```[\s\S]*?```',           # 代码块
+            r'`[^`]+`',                   # 行内代码
+            r'\*\*[^*]+\*\*',            # 粗体 **text**
+            r'\*[^*]+\*',                 # 斜体 *text*
+            r'__[^_]+__',                 # 粗体 __text__
+            r'_[^_]+_',                   # 斜体 _text_
+            r'#{1,6}\s',                 # 标题 # ## ###
+            r'\[([^\]]+)\]\(([^)]+)\)',  # 链接 [text](url)
+            r'!\[([^\]]*)\]\(([^)]+)\)', # 图片 ![alt](url)
+            r'^\s*[-*+]\s',              # 列表项 - * +
+            r'^\s*\d+\.\s',              # 有序列表 1. 2. 3.
+            r'^\s*>\s',                  # 引用 >
+            r'---|\*\*\*',               # 分隔线 --- ***
+            r'\|[^\|]+\|',               # 表格 |
+        ]
+        
+        import re
+        for pattern in markdown_patterns:
+            if re.search(pattern, content, re.MULTILINE):
+                logger.debug(f"[WPSChannel] Markdown pattern matched: {pattern}")
+                return "rich_text"
+        
+        return "text"
     
     def _is_duplicate(self, msg_id: str) -> bool:
         """检查消息是否重复"""
@@ -339,13 +417,32 @@ class WPSChannel:
         return None
     
     def _remove_at_content(self, content: str, msg: WPSMessage) -> str:
-        """移除@内容"""
+        """
+        移除@内容
+        
+        处理多种@格式：
+        1. @用户名 后跟空格或特殊空白字符
+        2. <at id="xxx">@用户名</at> XML格式
+        3. <at id="xxx">用户名</at> 不带@符号的XML格式
+        """
+        import re
+        
+        # 先移除 XML 格式的 at 标签
+        # 匹配 <at id="...">...</at> 或 <at id='...'>...</at>
+        content = re.sub(r'<at\s+id=["\'][^"\']*["\']>[^<]*</at>', '', content)
+        
+        # 再移除 @用户名 格式
         for at_info in msg.at_list:
             at_name = at_info.get("name", "")
             if at_name:
-                pattern = f"@{re.escape(at_name)}(\\u2005|\\u0020|\\s)"
+                # 匹配 @用户名 后跟空格或特殊空白字符（包括全角空格\u3000）
+                pattern = f"@{re.escape(at_name)}(\\u2005|\\u0020|\\s|\\u3000)*"
                 content = re.sub(pattern, "", content)
-        return content.strip()
+        
+        # 清理多余的空格
+        content = re.sub(r'\s+', ' ', content).strip()
+        
+        return content
 
 
 # 全局Channel实例

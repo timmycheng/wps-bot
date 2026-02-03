@@ -39,7 +39,7 @@ DEFAULT_CONFIG = {
     "expires_in_seconds": 3600,  # 会话过期时间
     
     # 人格描述
-    "character_desc": "你是WPS智能助手，一个由大型语言模型驱动的AI助手，可以帮助用户解答问题、处理文档、编写代码等。",
+    "character_desc": "你是一个由大型语言模型驱动的AI助手，可以帮助用户解答问题、处理文档、编写代码等。",
     
     # LLM 参数
     "temperature": 0.7,
@@ -115,6 +115,7 @@ def load_config(config_path: str = "config.json") -> Config:
         "LLM_API_KEY": "llm_api_key",
         "LLM_API_BASE": "llm_api_base",
         "LLM_MODEL": "llm_model",
+        "CHARACTER_DESC": "character_desc",
         "PORT": "port",
         "HOST": "host",
         "DEBUG": "debug",

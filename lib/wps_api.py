@@ -38,8 +38,13 @@ class WPSAPIClient:
     
     def _get_access_token(self) -> Optional[str]:
         """
-        获取 Access Token
-        支持缓存，避免频繁请求
+        获取 Access Token (Self-App Tenant Access Token)
+        
+        文档: https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/certification-authorization/get-token/selfapp-tenant-access-token
+        
+        注意:
+        - Content-Type: application/x-www-form-urlencoded
+        - grant_type: client_credentials
         
         :return: Access Token
         """
@@ -48,18 +53,20 @@ class WPSAPIClient:
             return self._access_token
         
         try:
-            # 使用KSO-1签名获取token
-            # 文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/api-description/signature-description-wps-3
-            
             url = f"{self.base_url}/oauth2/token"
             
+            # 使用 form-urlencoded 格式，不是 JSON
             payload = {
                 "grant_type": "client_credentials",
                 "client_id": self.app_id,
                 "client_secret": self.app_secret
             }
             
-            response = requests.post(url, json=payload, timeout=30)
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            
+            response = requests.post(url, data=payload, headers=headers, timeout=30)
             result = response.json()
             
             if result.get("access_token"):
@@ -106,6 +113,9 @@ class WPSAPIClient:
             url = f"{self.base_url}{uri}"
             
             # 构建请求体
+            # 确保 receiver_id 是字符串
+            receiver_id = str(receiver_id) if receiver_id else ""
+            
             payload = {
                 "type": msg_type,
                 "receiver": {
@@ -115,22 +125,55 @@ class WPSAPIClient:
             }
             
             # 设置消息内容
+            # 根据 WPS 文档：https://365.kdocs.cn/3rd/open/documents/app-integration-dev/wps365/server/im/message/message-content-description
+            # type=text 时，content.text.type 可以是 plain 或 markdown
             if msg_type == "text":
+                # 纯文本，不带格式
                 payload["content"] = {
-                    "text": content
+                    "text": {
+                        "content": content,
+                        "type": "plain"
+                    }
                 }
             elif msg_type == "rich_text":
+                # Markdown 格式，保留原始 Markdown 标记
                 payload["content"] = {
-                    "text": content
+                    "text": {
+                        "content": content,
+                        "type": "markdown"
+                    }
                 }
             else:
-                payload["content"] = {"text": content}
+                # 默认使用纯文本
+                payload["content"] = {
+                    "text": {
+                        "content": content,
+                        "type": "plain"
+                    }
+                }
             
             # 添加@列表
             if mentions:
                 payload["mentions"] = mentions
             
             body = json.dumps(payload, ensure_ascii=False)
+            
+            logger.info(f"[WPSAPIClient] Sending message to {receiver_type}:{receiver_id}")
+            logger.info(f"[WPSAPIClient] Request payload: {body}")
+            
+            # 验证 payload 格式
+            if not payload.get("receiver", {}).get("receiver_id"):
+                logger.error("[WPSAPIClient] receiver.receiver_id is empty!")
+                return False
+            
+            # 验证消息内容
+            if not content:
+                logger.error("[WPSAPIClient] Message content is empty!")
+                return False
+            
+            if len(content) > 5000:
+                logger.error(f"[WPSAPIClient] Message content too long: {len(content)} > 5000")
+                return False
             
             # 获取KSO-1签名头
             kso_headers = get_kso1_auth_headers(
@@ -148,12 +191,18 @@ class WPSAPIClient:
                 return False
             
             # 构建请求头
+            # 确保 Content-Type 正确设置（KSO-1 签名可能返回空字符串）
             headers = {
                 **kso_headers,
-                "Authorization": f"Bearer {access_token}"
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
             }
             
             # 发送请求
+            logger.debug(f"[WPSAPIClient] Request URL: {url}")
+            logger.debug(f"[WPSAPIClient] Request headers: {headers}")
+            logger.debug(f"[WPSAPIClient] Request body: {body}")
+            
             response = requests.post(
                 url,
                 headers=headers,
@@ -161,13 +210,39 @@ class WPSAPIClient:
                 timeout=30
             )
             
-            result = response.json()
+            logger.debug(f"[WPSAPIClient] Response status: {response.status_code}")
+            logger.debug(f"[WPSAPIClient] Response headers: {dict(response.headers)}")
+            
+            # 检查响应状态码
+            if response.status_code != 200:
+                logger.error(f"[WPSAPIClient] HTTP error {response.status_code}: {response.text[:500]}")
+                return False
+            
+            # 检查响应内容是否为空
+            if not response.text:
+                logger.error("[WPSAPIClient] Empty response from API")
+                return False
+            
+            # 尝试解析 JSON
+            try:
+                result = response.json()
+            except json.JSONDecodeError as e:
+                logger.error(f"[WPSAPIClient] Failed to parse JSON response: {e}")
+                logger.error(f"[WPSAPIClient] Response text: {response.text[:500]}")
+                return False
+            
+            logger.debug(f"[WPSAPIClient] Response body: {result}")
             
             if result.get("code") == 0:
                 logger.info(f"[WPSAPIClient] Message sent successfully, msg_id={result.get('data', {}).get('message_id')}")
                 return True
             else:
-                logger.error(f"[WPSAPIClient] Send message failed: {result}")
+                error_code = result.get("code", "unknown")
+                error_msg = result.get("msg", "unknown error")
+                logger.error(f"[WPSAPIClient] Send message failed!")
+                logger.error(f"[WPSAPIClient] Error code: {error_code}")
+                logger.error(f"[WPSAPIClient] Error message: {error_msg}")
+                logger.error(f"[WPSAPIClient] Full response: {result}")
                 return False
                 
         except Exception as e:
@@ -224,6 +299,65 @@ class WPSAPIClient:
             content=content,
             **kwargs
         )
+    
+    @staticmethod
+    def _markdown_to_plain(content: str) -> str:
+        """
+        将 Markdown 格式转换为纯文本
+        
+        移除 Markdown 标记但保留内容，使其适合在普通文本消息中显示
+        
+        :param content: Markdown 格式的内容
+        :return: 纯文本内容
+        """
+        import re
+        
+        if not content:
+            return ""
+        
+        result = content
+        
+        # 代码块 -> 保留内容但移除标记
+        result = re.sub(r'```[\s\S]*?\n([\s\S]*?)```', r'\1', result)
+        
+        # 行内代码 -> 移除反引号
+        result = re.sub(r'`([^`]+)`', r'\1', result)
+        
+        # 粗体和斜体 -> 移除标记
+        result = re.sub(r'\*\*([^*]+)\*\*', r'\1', result)
+        result = re.sub(r'\*([^*]+)\*', r'\1', result)
+        result = re.sub(r'__([^_]+)__', r'\1', result)
+        result = re.sub(r'_([^_]+)_', r'\1', result)
+        
+        # 标题 -> 移除 # 符号
+        result = re.sub(r'^#{1,6}\s*', '', result, flags=re.MULTILINE)
+        
+        # 链接 -> 显示为 文本(链接)
+        result = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1(\2)', result)
+        
+        # 图片 -> 显示为 [图片: alt]
+        result = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'[图片: \1]', result)
+        
+        # 列表标记 -> 移除
+        result = re.sub(r'^\s*[-*+]\s', '', result, flags=re.MULTILINE)
+        result = re.sub(r'^\s*\d+\.\s', '', result, flags=re.MULTILINE)
+        
+        # 引用标记 -> 移除
+        result = re.sub(r'^\s*>\s?', '', result, flags=re.MULTILINE)
+        
+        # 分隔线 -> 替换为换行
+        result = re.sub(r'\n?\s*[-*_]{3,}\s*\n?', '\n', result)
+        
+        # 表格 -> 简化处理，保留内容但移除表格标记
+        # 移除表格分隔符行
+        result = re.sub(r'\|[-:\|\s]+\|', '', result)
+        # 将表格行转换为普通文本
+        result = re.sub(r'\|([^\|]+)\|', lambda m: m.group(1).strip() + ' ', result)
+        
+        # 清理多余的空行
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        
+        return result.strip()
     
     def upload_image(self, image_data: bytes, filename: str = "image.png") -> Optional[str]:
         """

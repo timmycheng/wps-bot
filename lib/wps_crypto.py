@@ -2,157 +2,204 @@
 """
 WPS 开放平台加密/解密和签名工具
 支持：
-- WPS-3 签名（事件回调安全校验）
-- KSO-1 签名（API调用）
-- 消息加解密
+- 事件消息签名验证（HMAC-SHA256）
+- 事件消息解密（AES-CBC）
+- KSO-1 签名（API调用）- 新版签名算法
 """
 
 import base64
 import hashlib
 import hmac
 import json
-import struct
 import urllib.parse
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 
 from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-from Crypto.Util.Padding import pad, unpad
+from Crypto.Util.Padding import unpad
 
 from common.logger import logger
 
 
-class WPSCrypto:
-    """WPS消息加解密类"""
-    
-    AES_KEY_SIZE = 32  # AES-256
-    AES_IV_SIZE = 16   # AES IV长度
-    
-    def __init__(self, encoding_aes_key: str = ""):
-        """
-        初始化
-        :param encoding_aes_key: 加密密钥（Base64编码）
-        """
-        self.encoding_aes_key = encoding_aes_key
-        self.aes_key = None
-        
-        if encoding_aes_key:
-            try:
-                # 解码Base64密钥
-                self.aes_key = base64.b64decode(encoding_aes_key + "=")
-                if len(self.aes_key) != self.AES_KEY_SIZE:
-                    raise ValueError(f"Invalid AES key size: {len(self.aes_key)}")
-            except Exception as e:
-                logger.error(f"[WPSCrypto] Failed to decode AES key: {e}")
-                raise
-    
-    def encrypt(self, text: str, app_id: str) -> str:
-        """加密消息"""
-        if not self.aes_key:
-            raise ValueError("AES key not initialized")
-        
-        try:
-            # 构造明文：随机16字节 + 消息长度(4字节) + 消息 + app_id
-            random_bytes = get_random_bytes(16)
-            msg_bytes = text.encode('utf-8')
-            msg_len = struct.pack('!I', len(msg_bytes))
-            app_id_bytes = app_id.encode('utf-8')
-            
-            plaintext = random_bytes + msg_len + msg_bytes + app_id_bytes
-            
-            # PKCS7填充
-            padded = pad(plaintext, AES.block_size)
-            
-            # AES-256-CBC加密
-            iv = get_random_bytes(self.AES_IV_SIZE)
-            cipher = AES.new(self.aes_key, AES.MODE_CBC, iv)
-            ciphertext = cipher.encrypt(padded)
-            
-            # 组合IV和密文，Base64编码
-            result = base64.b64encode(iv + ciphertext).decode('utf-8')
-            return result
-            
-        except Exception as e:
-            logger.error(f"[WPSCrypto] Encryption failed: {e}")
-            raise
-    
-    def decrypt(self, ciphertext: str, app_id: str) -> str:
-        """解密消息"""
-        if not self.aes_key:
-            raise ValueError("AES key not initialized")
-        
-        try:
-            # Base64解码
-            encrypted = base64.b64decode(ciphertext)
-            
-            # 分离IV和密文
-            iv = encrypted[:self.AES_IV_SIZE]
-            ciphertext = encrypted[self.AES_IV_SIZE:]
-            
-            # AES-256-CBC解密
-            cipher = AES.new(self.aes_key, AES.MODE_CBC, iv)
-            padded = cipher.decrypt(ciphertext)
-            
-            # 去除PKCS7填充
-            plaintext = unpad(padded, AES.block_size)
-            
-            # 解析明文结构
-            msg_len = struct.unpack('!I', plaintext[16:20])[0]
-            msg = plaintext[20:20+msg_len].decode('utf-8')
-            received_app_id = plaintext[20+msg_len:].decode('utf-8')
-            
-            # 验证app_id
-            if received_app_id != app_id:
-                raise ValueError(f"AppID mismatch: {received_app_id} != {app_id}")
-            
-            return msg
-            
-        except Exception as e:
-            logger.error(f"[WPSCrypto] Decryption failed: {e}")
-            raise
+def md5_hash(s: str) -> str:
+    """计算 MD5 哈希（小写十六进制）"""
+    return hashlib.md5(s.encode('utf-8')).hexdigest()
 
 
-# ==================== WPS-3 签名（事件回调安全校验）====================
-
-def generate_wps3_signature(app_secret: str, timestamp: str, nonce: str, body: str = "") -> str:
+def hmac_sha256(message: str, secret: str) -> str:
     """
-    生成 WPS-3 签名（用于事件回调安全校验）
+    HMAC-SHA256 签名，返回 URL Safe No Padding base64
     
-    签名算法: sha256(AppSecret + Timestamp + Nonce + Body)
+    注意：这是 WPS 事件消息签名使用的算法
+    """
+    key = secret.encode('utf-8')
+    msg = message.encode('utf-8')
+    signature = hmac.new(key, msg, hashlib.sha256).digest()
+    # URL Safe No Padding base64
+    return base64.urlsafe_b64encode(signature).rstrip(b'=').decode('utf-8')
+
+
+def verify_event_signature(
+    app_id: str,
+    app_secret: str,
+    topic: str,
+    nonce: str,
+    time: int,
+    encrypted_data: str,
+    signature: str
+) -> bool:
+    """
+    验证 WPS 事件消息签名
     
+    签名算法: HMAC-SHA256(AppSecret, content)
+    其中 content = app_id:topic:nonce:time:encrypted_data
+    签名结果使用 URL Safe No Padding base64 编码
+    
+    :param app_id: 应用 ID
     :param app_secret: 应用密钥
-    :param timestamp: 时间戳（毫秒）
-    :param nonce: 随机字符串
-    :param body: 请求体
-    :return: 签名
-    """
-    try:
-        sign_str = f"{app_secret}{timestamp}{nonce}{body}"
-        signature = hashlib.sha256(sign_str.encode('utf-8')).hexdigest()
-        return signature
-    except Exception as e:
-        logger.error(f"[WPSCrypto] WPS-3 signature generation failed: {e}")
-        raise
-
-
-def verify_wps3_signature(app_secret: str, timestamp: str, nonce: str, signature: str, body: str = "") -> bool:
-    """
-    验证 WPS-3 签名
-    
-    :param app_secret: 应用密钥
-    :param timestamp: 时间戳
-    :param nonce: 随机字符串
+    :param topic: 消息主题
+    :param nonce: 随机字符串（也是解密用的 IV）
+    :param time: 时间戳（秒）
+    :param encrypted_data: 加密数据
     :param signature: 待验证的签名
-    :param body: 请求体
     :return: 验证结果
     """
     try:
-        computed = generate_wps3_signature(app_secret, timestamp, nonce, body)
-        return hmac.compare_digest(computed.lower(), signature.lower())
+        # 构建签名内容
+        content = f"{app_id}:{topic}:{nonce}:{time}:{encrypted_data}"
+        
+        # 计算签名
+        computed = hmac_sha256(content, app_secret)
+        
+        logger.debug(f"[WPSCrypto] Sign content: {content}")
+        logger.debug(f"[WPSCrypto] Computed signature: {computed}")
+        logger.debug(f"[WPSCrypto] Received signature: {signature}")
+        
+        # 比较签名（不区分大小写，因为 base64 可能有大小写差异）
+        result = hmac.compare_digest(computed, signature)
+        if not result:
+            logger.warning(f"[WPSCrypto] Signature mismatch! computed={computed}, received={signature}")
+        return result
     except Exception as e:
-        logger.error(f"[WPSCrypto] WPS-3 signature verification failed: {e}")
+        logger.error(f"[WPSCrypto] Signature verification failed: {e}")
         return False
+
+
+def decrypt_event_data(encrypted_data: str, app_secret: str, nonce: str) -> dict:
+    """
+    解密 WPS 事件消息
+    
+    根据官方文档：
+    1. encrypted_data 使用标准的有填充 base64 编码，解密前需要先进行 base64 解码
+    2. 数据通过 AES-CBC 进行加密
+    3. cipher 为 md5 编码后的 secretKey（32字符 hex 字符串）
+    4. nonce 即 iv 向量
+    5. 解密后的数据经过 PKCS7 填充，解密后需要删除尾部填充
+    
+    参考 Go 实现：
+    - cipher := Md5(secretKey)  // 返回 32字符 hex 字符串
+    - rawData, err := AESCBCPKCS7Decrypt(data, []byte(cipher), []byte(nonce))
+    
+    Go 的 aes.NewCipher 会根据 key 长度自动选择：
+    - 16 字节 = AES-128
+    - 24 字节 = AES-192  
+    - 32 字节 = AES-256
+    
+    由于 md5 hex 是 32 字符，转成 []byte 是 32 字节，所以 Go 代码使用的是 AES-256
+    
+    :param encrypted_data: 加密的数据（base64 编码）
+    :param app_secret: 应用密钥
+    :param nonce: IV 向量
+    :return: 解密后的 JSON 字典
+    """
+    # 1. Base64 解码加密数据
+    try:
+        encrypted_bytes = base64.b64decode(encrypted_data)
+    except Exception as e:
+        logger.error(f"[WPSCrypto] Base64 decode failed: {e}")
+        raise
+    
+    # 2. 计算 cipher: md5(secretKey) -> 32字符 hex 字符串
+    cipher_key = md5_hash(app_secret)  # 如 "5d41402abc4b2a76b9719d911017c592"
+    
+    # 3. 密钥: hex 字符串转成 bytes（32字节 = AES-256）
+    key = cipher_key.encode('utf-8')
+    
+    # 4. IV: nonce 转成 bytes（取前16字节确保长度）
+    iv = nonce.encode('utf-8')
+    if len(iv) < 16:
+        # 如果 nonce 不足16字节，右填充 \0
+        iv = iv.ljust(16, b'\0')
+    elif len(iv) > 16:
+        iv = iv[:16]
+    
+    logger.info(f"[WPSCrypto] Decrypting event data...")
+    logger.debug(f"[WPSCrypto] App secret length: {len(app_secret)}")
+    logger.debug(f"[WPSCrypto] Cipher (md5 hex): {cipher_key}")
+    logger.debug(f"[WPSCrypto] Key bytes: {len(key)} bytes (hex: {key.hex()})")
+    logger.debug(f"[WPSCrypto] IV bytes: {len(iv)} bytes (hex: {iv.hex()})")
+    logger.debug(f"[WPSCrypto] Encrypted data length: {len(encrypted_data)} (base64)")
+    logger.debug(f"[WPSCrypto] Encrypted bytes: {len(encrypted_bytes)}")
+    logger.debug(f"[WPSCrypto] Encrypted bytes (hex): {encrypted_bytes[:32].hex()}...")
+    
+    # 检查密文长度是否是16的倍数
+    if len(encrypted_bytes) % 16 != 0:
+        logger.error(f"[WPSCrypto] Invalid ciphertext length: {len(encrypted_bytes)} (not multiple of 16)")
+        raise ValueError(f"Ciphertext length must be multiple of 16, got {len(encrypted_bytes)}")
+    
+    # 5. AES-CBC 解密
+    try:
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted_padded = cipher.decrypt(encrypted_bytes)
+        logger.debug(f"[WPSCrypto] Decrypted bytes (with padding): {len(decrypted_padded)}")
+        logger.debug(f"[WPSCrypto] Last 16 bytes (hex): {decrypted_padded[-16:].hex()}")
+        logger.debug(f"[WPSCrypto] Last byte (padding indicator): {decrypted_padded[-1]}")
+    except Exception as e:
+        logger.error(f"[WPSCrypto] AES decrypt failed: {e}")
+        raise
+    
+    # 6. PKCS7 去填充
+    try:
+        padding_len = decrypted_padded[-1]
+        logger.debug(f"[WPSCrypto] PKCS7 padding length: {padding_len}")
+        
+        # 验证填充是否合法
+        if padding_len < 1 or padding_len > 16:
+            logger.error(f"[WPSCrypto] Invalid PKCS7 padding length: {padding_len}")
+            raise ValueError(f"Invalid PKCS7 padding length: {padding_len}")
+        
+        # 验证填充字节是否一致
+        padding_bytes = decrypted_padded[-padding_len:]
+        if not all(b == padding_len for b in padding_bytes):
+            logger.error(f"[WPSCrypto] Invalid PKCS7 padding bytes")
+            raise ValueError("Invalid PKCS7 padding bytes")
+        
+        decrypted = decrypted_padded[:-padding_len]
+        logger.debug(f"[WPSCrypto] Decrypted bytes (after unpad): {len(decrypted)}")
+    except Exception as e:
+        logger.error(f"[WPSCrypto] PKCS7 unpad failed: {e}")
+        # 尝试使用库函数
+        try:
+            decrypted = unpad(decrypted_padded, AES.block_size)
+            logger.debug(f"[WPSCrypto] Unpad successful using library function")
+        except Exception as e2:
+            logger.error(f"[WPSCrypto] Library unpad also failed: {e2}")
+            raise
+    
+    # 7. JSON 解析
+    try:
+        decrypted_text = decrypted.decode('utf-8')
+        logger.debug(f"[WPSCrypto] Decrypted text (first 200 chars): {decrypted_text[:200]}")
+        result = json.loads(decrypted_text)
+        logger.info(f"[WPSCrypto] Decryption successful")
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"[WPSCrypto] JSON parse failed: {e}")
+        logger.error(f"[WPSCrypto] Decrypted text: {decrypted[:200]}")
+        raise
+    except Exception as e:
+        logger.error(f"[WPSCrypto] Decoding failed: {e}")
+        raise
 
 
 # ==================== KSO-1 签名（API调用）====================
@@ -162,58 +209,57 @@ def generate_kso1_signature(
     app_secret: str,
     method: str,
     uri: str,
-    date: str,
-    query_params: Dict = None,
+    content_type: str,
+    kso_date: str,
     body: str = ""
 ) -> str:
     """
-    生成 KSO-1 签名（用于API调用）
+    生成 KSO-1 签名（新版签名算法）
     
-    签名算法:
-    Authorization = KSO-1:{AppID}:{Signature}
-    Signature = base64(hmac-sha1(AppSecret, StringToSign))
-    StringToSign = HTTP-Verb + "\n" + 
-                   Content-MD5 + "\n" + 
-                   Content-Type + "\n" + 
-                   Date + "\n" + 
-                   {CanonicalizedKSOHeaders} + 
-                   {CanonicalizedResource}
+    根据官方文档：
+    signature = HMAC-SHA256(secretKey, content)
+    content = "KSO-1" + Method + RequestURI + ContentType + KsoDate + sha256(RequestBody)
     
-    :param app_id: 应用ID
-    :param app_secret: 应用密钥
+    其中：
+    - "KSO-1": 固定内容，签名版本字符串
+    - Method: 请求的方法 (GET/POST等)
+    - RequestURI: 请求的 URI，包含 query 参数，例：/v7/messages/create
+    - ContentType: 如 application/json
+    - KsoDate: RFC1123 格式的日期
+    - sha256(RequestBody): 当请求体不为空时，使用 SHA256 哈希算法计算请求体的值（hex 编码）
+    
+    返回的签名是 hex 编码的字符串（不是 base64）
+    
+    :param app_id: 应用ID (用于构建 Authorization header，不参与签名)
+    :param app_secret: 应用密钥 (用于签名)
     :param method: HTTP方法 (GET/POST等)
-    :param uri: 请求URI (如 /v7/messages/create)
-    :param date: RFC1123格式的日期
-    :param query_params: URL查询参数
-    :param body: 请求体
-    :return: 签名
+    :param uri: 请求URI (包含 query 参数，如 /v7/messages/create)
+    :param content_type: Content-Type 头，如 application/json
+    :param kso_date: RFC1123格式的日期
+    :param body: 请求体（原始字符串）
+    :return: 签名（hex 编码）
     """
     try:
-        # 计算Content-MD5（如果有body）
-        content_md5 = ""
-        content_type = "application/json" if body else ""
-        
+        # 计算请求体的 SHA256
+        sha256_hex = ""
         if body:
-            content_md5 = hashlib.md5(body.encode('utf-8')).hexdigest()
+            sha256_hex = hashlib.sha256(body.encode('utf-8')).hexdigest()
         
-        # 构建CanonicalizedResource
-        canonicalized_resource = uri
-        if query_params:
-            sorted_params = sorted(query_params.items())
-            query_string = urllib.parse.urlencode(sorted_params)
-            canonicalized_resource += "?" + query_string
+        # 构建签名内容
+        # content = "KSO-1" + Method + RequestURI + ContentType + KsoDate + sha256(RequestBody)
+        sign_content = f"KSO-1{method.upper()}{uri}{content_type}{kso_date}{sha256_hex}"
         
-        # 构建StringToSign
-        string_to_sign = f"{method.upper()}\n{content_md5}\n{content_type}\n{date}\n{canonicalized_resource}"
+        logger.debug(f"[WPSCrypto] KSO-1 sign content: {sign_content}")
+        logger.debug(f"[WPSCrypto] KSO-1 sha256(body): {sha256_hex}")
         
-        # HMAC-SHA1签名
-        signature = base64.b64encode(
-            hmac.new(
-                app_secret.encode('utf-8'),
-                string_to_sign.encode('utf-8'),
-                hashlib.sha1
-            ).digest()
-        ).decode('utf-8')
+        # HMAC-SHA256 签名
+        signature = hmac.new(
+            app_secret.encode('utf-8'),
+            sign_content.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        logger.debug(f"[WPSCrypto] KSO-1 signature: {signature}")
         
         return signature
         
@@ -227,38 +273,31 @@ def get_kso1_auth_headers(
     app_secret: str,
     method: str,
     uri: str,
-    query_params: Dict = None,
     body: str = ""
 ) -> Dict[str, str]:
     """
     获取 KSO-1 认证的请求头
     
+    :param app_id: 应用ID
+    :param app_secret: 应用密钥
+    :param method: HTTP方法
+    :param uri: 请求URI（包含 query 参数）
+    :param body: 请求体
     :return: 请求头字典
     """
-    # RFC1123格式的日期
-    date = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+    # RFC1123 格式的日期
+    kso_date = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+    content_type = "application/json" if body else ""
     
     # 生成签名
-    signature = generate_kso1_signature(app_id, app_secret, method, uri, date, query_params, body)
+    signature = generate_kso1_signature(
+        app_id, app_secret, method, uri, content_type, kso_date, body
+    )
     
+    # Authorization 格式: "KSO-1 accessKey:signature"
+    # 注意：KSO-1 后面有一个空格
     return {
-        "X-Kso-Date": date,
-        "X-Kso-Authorization": f"KSO-1:{app_id}:{signature}",
-        "Content-Type": "application/json" if body else ""
+        "X-Kso-Date": kso_date,
+        "X-Kso-Authorization": f"KSO-1 {app_id}:{signature}",
+        "Content-Type": content_type
     }
-
-
-# ==================== 工具函数 ====================
-
-def decrypt_message(encrypt_key: str, encrypted_msg: str, app_id: str) -> dict:
-    """解密WPS消息"""
-    crypto = WPSCrypto(encrypt_key)
-    decrypted = crypto.decrypt(encrypted_msg, app_id)
-    return json.loads(decrypted)
-
-
-def encrypt_message(encrypt_key: str, msg_dict: dict, app_id: str) -> str:
-    """加密WPS消息"""
-    crypto = WPSCrypto(encrypt_key)
-    msg_str = json.dumps(msg_dict, ensure_ascii=False)
-    return crypto.encrypt(msg_str, app_id)
