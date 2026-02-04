@@ -8,6 +8,9 @@ import time
 from typing import Dict, List, Optional
 
 import openai
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from common.logger import logger
 from common.session_manager import get_session_manager
@@ -22,8 +25,44 @@ class LLMBot:
     
     def __init__(self):
         self.config = get_config()
+        self._session: Optional[requests.Session] = None
         self._setup_openai()
         logger.info("[LLMBot] Initialized")
+    
+    def _get_session(self) -> requests.Session:
+        """获取或创建带连接池的 Session"""
+        if self._session is None:
+            self._session = requests.Session()
+            
+            # 配置重试策略：连接错误时自动重试
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+            )
+            
+            # 配置连接池：保持连接活跃，防止被网关切断
+            adapter = HTTPAdapter(
+                pool_connections=10,
+                pool_maxsize=20,
+                max_retries=retry_strategy,
+                pool_block=False
+            )
+            
+            self._session.mount("http://", adapter)
+            self._session.mount("https://", adapter)
+            
+            # 设置 keep-alive header
+            self._session.headers.update({
+                "Connection": "keep-alive",
+                "Keep-Alive": "timeout=60, max=1000"
+            })
+            
+            # 将 session 设置给 openai
+            openai.requestssession = self._session
+            
+        return self._session
     
     def _setup_openai(self):
         """配置OpenAI客户端"""
@@ -35,6 +74,9 @@ class LLMBot:
         if api_base:
             openai.api_base = api_base
             logger.info(f"[LLMBot] Using custom API base: {api_base}")
+        
+        # 初始化 session（连接池）
+        self._get_session()
     
     def chat(self, query: str, session_id: str, context: Optional[Dict] = None) -> str:
         """
@@ -64,8 +106,8 @@ class LLMBot:
             # 添加用户消息
             session.add_message("user", query)
             
-            # 调用LLM
-            response = self._call_llm(session.get_messages())
+            # 调用LLM（带重试机制）
+            response = self._call_llm_with_retry(session.get_messages())
             
             # 添加助手回复到会话
             session.add_message("assistant", response)
@@ -132,6 +174,9 @@ class LLMBot:
             
             logger.debug(f"[LLMBot] Calling LLM with {len(messages)} messages")
             
+            # 确保使用带连接池的 session
+            self._get_session()
+            
             response = openai.ChatCompletion.create(
                 model=model,
                 messages=messages,
@@ -166,7 +211,17 @@ class LLMBot:
             logger.error(f"[LLMBot] API error: {e}")
             return f"🔌 API错误：{str(e)}"
         
+        except (ConnectionError, requests.exceptions.ConnectionError) as e:
+            # 捕获连接重置错误，交由上层重试
+            logger.warning(f"[LLMBot] Connection error (will retry): {e}")
+            raise
+        
         except Exception as e:
+            error_msg = str(e).lower()
+            # 检查是否是连接重置相关错误
+            if any(kw in error_msg for kw in ["connection", "reset", "aborted", "peer", "broken pipe"]):
+                logger.warning(f"[LLMBot] Connection reset detected (will retry): {e}")
+                raise ConnectionError(f"Connection reset: {e}")
             logger.error(f"[LLMBot] LLM call failed: {e}")
             raise
     
@@ -185,11 +240,31 @@ class LLMBot:
         except Exception as e:
             if retry_count < max_retries:
                 wait_time = 3 * (retry_count + 1)
-                logger.warning(f"[LLMBot] Retry {retry_count + 1} after {wait_time}s")
+                error_type = type(e).__name__
+                logger.warning(f"[LLMBot] {error_type} - Retry {retry_count + 1}/{max_retries} after {wait_time}s: {e}")
                 time.sleep(wait_time)
+                
+                # 如果是连接错误，重置 session 以创建新连接
+                if isinstance(e, (ConnectionError, requests.exceptions.ConnectionError)) or \
+                   any(kw in str(e).lower() for kw in ["connection", "reset", "aborted"]):
+                    logger.info("[LLMBot] Resetting connection pool for retry")
+                    self._reset_session()
+                
                 return self._call_llm_with_retry(messages, retry_count + 1)
             else:
                 raise
+    
+    def _reset_session(self):
+        """重置连接池，用于连接错误后重建连接"""
+        if self._session:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+        self._session = None
+        openai.requestssession = None
+        # 重新初始化
+        self._get_session()
 
 
 # 全局Bot实例
